@@ -1,7 +1,5 @@
 import os
-import shutil
 import asyncio
-from glob import glob
 from pyrogram import Client
 from telethon import Button
 
@@ -27,25 +25,8 @@ class Utils:
             LOGS.error(f"Failed to download episode: {str(e)}")
             return None
 
-    async def generate_download_link(self, file):
-        """Generate file download link for Telegram."""
-        try:
-            file_hash = self.generate_hash(file)
-            _hash = secrets.token_hex(nbytes=7)
-            download_link = f"https://t.me/{self.bot.username}?start={_hash}"
-            # Store the file and link in the database
-            await self.bot.db.store_items(_hash, [file.id])
-            return download_link
-        except Exception as e:
-            LOGS.error(f"Failed to generate download link: {str(e)}")
-            return None
-
-    def generate_hash(self, file):
-        """Generate a hash for the given file."""
-        return file.file_id[:16]
-
-    async def send_episode(self, file, caption, is_button=False):
-        """Send the anime episode to the channel."""
+    async def upload_episode_to_telegram(self, file, caption):
+        """Upload the anime episode to the Telegram channel."""
         try:
             message = await self.bot.send_document(
                 Var.MAIN_CHANNEL,
@@ -55,11 +36,12 @@ class Utils:
             )
             return message
         except Exception as e:
-            LOGS.error(f"Failed to send episode: {str(e)}")
+            LOGS.error(f"Failed to upload episode: {str(e)}")
             return None
 
-    async def create_buttons(self, download_link):
-        """Create the button for downloading the episode."""
+    async def create_buttons(self, file_id):
+        """Create a button to allow users to download the file from Telegram."""
+        download_link = f"https://t.me/{self.bot.username}?start={file_id}"
         try:
             return [
                 Button.url("Download 480p", download_link)
@@ -68,12 +50,36 @@ class Utils:
             LOGS.error(f"Failed to create buttons: {str(e)}")
             return []
 
-    async def clean_up(self, file_path):
-        """Clean up downloaded and processed files."""
+    async def send_episode_with_buttons(self, file, caption):
+        """Upload the episode and send a download link with buttons."""
         try:
-            if os.path.exists(file_path):
-                os.remove(file_path)
-            else:
-                LOGS.warning(f"File not found: {file_path}")
+            # Upload the episode to Telegram
+            message = await self.upload_episode_to_telegram(file, caption)
+
+            # Generate the download link and create buttons
+            download_link = f"https://t.me/{self.bot.username}?start={message.id}"
+            buttons = await self.create_buttons(message.id)
+
+            # Edit the message to include buttons
+            await self.bot.edit_message_text(
+                message.chat.id,
+                message.id,
+                caption,
+                reply_markup=buttons
+            )
+
+            return message
         except Exception as e:
-            LOGS.error(f"Failed to clean up file: {str(e)}")
+            LOGS.error(f"Failed to send episode with buttons: {str(e)}")
+            return None
+
+    async def force_subscription_check(self, user_id):
+        """Check if the user is subscribed to the required channel."""
+        try:
+            is_subscribed = await self.bot.is_member(Var.FORCESUB_CHANNEL, user_id)
+            if not is_subscribed:
+                return False
+            return True
+        except Exception as e:
+            LOGS.error(f"Failed to check subscription: {str(e)}")
+            return False
