@@ -51,22 +51,25 @@ class Bot(Client):
     async def start_client(self, **kwargs):
         """Function to start the client."""
         if self._log_at:
-            self.logger.info("Trying to login.")
+            self.logger.info("Attempting to login to Telegram.")
         try:
             await self.start(**kwargs)
             if self.user_client:
                 await self.user_client.start()
             await self.pyro_client.start()
+            self.logger.info("Successfully logged in.")
         except Exception as e:
-            self.logger.critical(str(e))
+            self.logger.critical(f"Error while logging in: {str(e)}")
             sys.exit(1)
 
     async def is_joined(self, channel_id, user_id):
         """Check if the user is a member of the forced subscription channel."""
         try:
             await self.pyro_client.get_participant(channel_id, user_id)
+            self.logger.info(f"User {user_id} is already subscribed to {channel_id}.")
             return True
         except UserNotParticipantError:
+            self.logger.warning(f"User {user_id} is NOT subscribed to {channel_id}.")
             return False
 
     async def force_subscribe(self, user_id):
@@ -77,7 +80,9 @@ class Bot(Client):
                 user_id,
                 f"Please join the channel to get access: {link}",
             )
+            self.logger.info(f"Sent subscription reminder to {user_id}.")
             return False
+        self.logger.info(f"User {user_id} has subscribed successfully.")
         return True
 
     async def generate_invite_link(self, channel_id):
@@ -86,20 +91,22 @@ class Bot(Client):
             invite = await self.pyro_client.export_chat_invite_link(channel_id)
             return invite
         except Exception as e:
-            LOGS.error(f"Failed to generate invite link: {str(e)}")
+            self.logger.error(f"Failed to generate invite link: {str(e)}")
             return ""
 
     async def upload_anime(self, file, caption, thumb=None, is_button=False):
         """Upload the anime episode to Telegram with the given caption and thumbnail."""
         if not self.pyro_client.is_connected:
             await self.pyro_client.connect()
+        self.logger.info(f"Uploading file {file} to {Var.MAIN_CHANNEL}.")
         post = await self.pyro_client.send_document(
-            Var.BACKUP_CHANNEL if is_button else Var.MAIN_CHANNEL,
+            Var.MAIN_CHANNEL,  # Using main channel directly for 480p uploads
             file,
             caption=f"`{caption}`",
             force_document=True,
             thumb=thumb or "thumb.jpg",
         )
+        self.logger.info(f"Uploaded file successfully with message ID {post.id}.")
         return post
 
     def run_in_loop(self, function):
