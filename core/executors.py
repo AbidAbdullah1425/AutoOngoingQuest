@@ -1,133 +1,102 @@
 import asyncio
 import os
-from pathlib import Path
-from datetime import datetime
+import secrets
+import shutil
+from glob import glob
+from traceback import format_exc
 
-from aiohttp import ClientSession
-from pyrogram import Client
-from pyrogram.errors import FloodWait
-from pyrogram.types import Message
+from telethon import Button
 
-from libs.ariawrap import aria2_download
-from libs.logger import LOGS
-from libs.subsplease import SubsPlease
-from libs.kitsu import Kitsu
+from core.bot import LOGS, Bot, Var
 from database import DataBase
-from functions.config import Var
+from functions.info import AnimeInfo
+from functions.tools import Tools
+from libs.logger import Reporter
+from libs.ariawrap import aria2_download  # Import for downloading
 
-
-class Executor:
-    def __init__(self, bot: Client):
+class Executors:
+    def __init__(
+        self,
+        bot: Bot,
+        dB: DataBase,
+        configurations: dict,
+        input_file: str,
+        info: AnimeInfo,
+        reporter: Reporter,
+    ):
+        self.is_original = configurations.get("original_upload")
+        self.is_button = configurations.get("button_upload")
+        self.anime_info = info
         self.bot = bot
-        self.db = DataBase()
+        self.input_file = input_file
+        self.tools = Tools()
+        self.db = dB
+        self.reporter = reporter
+        self.msg_id = None
+        self.output_file = None
 
-    async def start(self):
-        """
-        Start the main process to check RSS feed, download episodes and update posts.
-        """
-        await self.db.toggle_separate_channel_upload()
-
-        while True:
-            try:
-                await self.check_for_new_episodes()
-                await asyncio.sleep(60)  # Check every minute
-            except Exception as e:
-                LOGS.error(f"Error while processing: {str(e)}")
-                await asyncio.sleep(10)
-
-    async def check_for_new_episodes(self):
-        """
-        Check the RSS feed and process new episodes.
-        """
-        LOGS.info("Checking for new episodes in RSS feed")
-        rss = SubsPlease()
-        episodes = await rss.fetch_episodes()
-
-        for episode in episodes:
-            anime_title = episode["title"]
-            anime_url = episode["url"]
-            episode_number = episode["episode"]
-            episode_season = episode.get("season", "Unknown")  # Get the season from RSS, if available
-            episode_quality = "480p"
-
-            if not await self.db.is_anime_uploaded(anime_title):
-                LOGS.info(f"New episode detected: {anime_title} - Episode {episode_number}")
-                await self.process_episode(anime_title, anime_url, episode_number, episode_season, episode_quality)
-                await self.db.add_anime(anime_title)
-
-    async def process_episode(self, anime_title: str, anime_url: str, episode_number: int, season: str, quality: str):
-        """
-        Process the anime episode by downloading it, uploading to Telegram, and updating post.
-        """
+    async def execute(self):
         try:
-            LOGS.info(f"Downloading episode {episode_number} of {anime_title}")
+            # 1. Download the anime episode (no renaming, no compressing)
+            rename = await self.anime_info.rename(self.is_original)
+            self.output_file = f"encode/{rename}"
+            thumb = await self.tools.cover_dl((await self.anime_info.get_poster()))
+            
+            # 2. Directly download the episode (480p version)
+            file_path = await aria2_download(self.anime_info.data["anime_url"], "480p")
 
-            # Download the episode
-            file_path = await aria2_download(anime_url, quality)
+            # 3. Upload to Telegram
+            await self.reporter.started_uploading()
 
-            # Upload the file to Telegram
-            await self.upload_to_telegram(anime_title, episode_number, season, file_path)
+            # Upload with the correct caption and possibly buttons
+            msg = await self.bot.upload_anime(
+                file_path, rename, thumb or "thumb.jpg"
+            )
 
-            # Update the post with the download link
-            await self.update_post_with_link(anime_title, episode_number, season, quality, file_path)
+            self.msg_id = msg.id
 
-        except Exception as e:
-            LOGS.error(f"Error while processing episode {anime_title} - {episode_number}: {str(e)}")
-
-    async def upload_to_telegram(self, anime_title: str, episode_number: int, season: str, file_path: str):
-        """
-        Upload the downloaded file to Telegram.
-        """
-        try:
-            # Open the file for upload
-            with open(file_path, "rb") as f:
-                caption = f"✨ Anime Name: {anime_title} | {anime_title} ✨\n" \
-                          f"━━━━━━━━━━━━━━━\n" \
-                          f"🗣 Language: Japanese\n" \
-                          f"📺 Quality: {quality}\n" \
-                          f"🍂 Season: {season}\n" \
-                          f"📆 Episode: {episode_number}\n" \
-                          f"━━━━━━━━━━━━━━━"
-                
-                # Upload to the appropriate channel
-                if Var.MAIN_CHANNEL:
-                    await self.bot.send_document(
-                        Var.MAIN_CHANNEL,
-                        f,
-                        caption=caption,
-                        reply_markup=None,
-                        disable_notification=True
-                    )
-                    LOGS.info(f"Successfully uploaded episode {episode_number} to channel.")
-        except Exception as e:
-            LOGS.error(f"Error uploading to Telegram for episode {anime_title} - {episode_number}: {str(e)}")
-
-    async def update_post_with_link(self, anime_title: str, episode_number: int, season: str, quality: str, file_path: str):
-        """
-        Update the post in Telegram with the download link.
-        """
-        try:
-            # Generate download link
-            download_link = f"https://t.me/{Var.BOT_USERNAME}?start={episode_number}"
-
-            # Edit the post with the download link
-            message = f"✨ Anime Name: {anime_title} | {anime_title} ✨\n" \
-                      f"━━━━━━━━━━━━━━━\n" \
-                      f"🗣 Language: Japanese\n" \
-                      f"📺 Quality: {quality}\n" \
-                      f"🍂 Season: {season}\n" \
-                      f"📆 Episode: {episode_number}\n" \
-                      f"━━━━━━━━━━━━━━━"
-
-            # Update the original post with the link
-            if Var.MAIN_CHANNEL:
-                await self.bot.send_message(
-                    Var.MAIN_CHANNEL,
-                    message,
-                    reply_markup=InlineKeyboardMarkup(
-                        [[InlineKeyboardButton("Download 480p", url=download_link)]]
-                    )
+            if self.is_button:
+                # Generate buttons for download and other options
+                btn = Button.url(
+                    f"{self.anime_info.data.get('video_resolution')}",
+                    url=f"https://t.me/{((await self.bot.get_me()).username)}?start={msg.id}",
                 )
-            LOGS.info(f"Successfully updated post with download link for episode {anime_title} - {episode_number}.")
-        except Exception as e:
-            LOGS.error(f"Error updating post for episode {anime_title} - {episode_number}: {str(e)}")
+                return True, btn
+
+            return True, []
+
+        except BaseException:
+            await self.reporter.report_error(str(format_exc()), log=True)
+            return False, str(format_exc())
+
+    def run_further_work(self):
+        asyncio.run(self.further_work())
+
+    async def further_work(self):
+        try:
+            if self.msg_id:
+                # Proceed without screenshots or media info
+                msg = await self.bot.get_messages(
+                    Var.BACKUP_CHANNEL if self.is_button else Var.MAIN_CHANNEL,
+                    ids=self.msg_id,
+                )
+                btn = [
+                    [],
+                ]
+
+                # No media info or screenshots functionality
+                await msg.edit(buttons=btn)
+
+                # Store and cleanup
+                _hash = secrets.token_hex(nbytes=7)
+                try:
+                    shutil.rmtree(_hash)
+                    os.remove(self.input_file)
+                    os.remove(self.output_file)
+                except BaseException:
+                    LOGS.error(str(format_exc()))
+
+            await self.reporter.all_done()
+
+        except BaseException:
+            await self.reporter.report_error(str(format_exc()), log=True)
