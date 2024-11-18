@@ -1,22 +1,3 @@
-#    This file is part of the AutoAnime distribution.
-#    Copyright (c) 2024 Kaif_00z
-#
-#    This program is free software: you can redistribute it and/or modify
-#    it under the terms of the GNU General Public License as published by
-#    the Free Software Foundation, version 3.
-#
-#    This program is distributed in the hope that it will be useful, but
-#    WITHOUT ANY WARRANTY; without even the implied warranty of
-#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-#    General Public License for more details.
-#
-# License can be found in <
-# https://github.com/kaif-00z/AutoAnimeBot/blob/main/LICENSE > .
-
-# if you are using this following code then don't forgot to give proper
-# credit to t.me/kAiF_00z (github.com/kaif-00z)
-# little bit inspired from pyUltroid.BaseClient
-
 import asyncio
 import sys
 from logging import Logger
@@ -33,7 +14,6 @@ from telethon.errors import (
 from telethon.errors.rpcerrorlist import UserNotParticipantError
 from telethon.sessions import StringSession
 from telethon.tl.functions.channels import (
-    CreateChannelRequest,
     EditPhotoRequest,
     GetParticipantRequest,
 )
@@ -141,41 +121,6 @@ class Bot(TelegramClient):
         except UserNotParticipantError:
             return False
 
-    async def create_channel(self, title: str, logo=None):
-        try:
-            r = await self.user_client(
-                CreateChannelRequest(
-                    title=title,
-                    about="Powered By github.com/kaif-00z/AutoAnimeBot",
-                    megagroup=False,
-                )
-            )
-            created_chat_id = r.chats[0].id
-            chat_id = int(f"-100{created_chat_id}")
-            await asyncio.sleep(2)
-            await self.user_client.edit_admin(
-                int(chat_id),
-                f"{((await self.get_me()).username)}",
-                post_messages=True,
-                edit_messages=True,
-                delete_messages=True,
-                ban_users=True,
-                pin_messages=True,
-                add_admins=True,
-            )
-            if logo:
-                try:
-                    await self.user_client(
-                        EditPhotoRequest(
-                            chat_id, (await self.user_client.upload_file(logo))
-                        )
-                    )
-                except BaseException:
-                    pass
-            return chat_id
-        except BaseException:
-            LOGS.error(format_exc())
-
     async def generate_invite_link(self, channel_id):
         try:
             data = await self.user_client(
@@ -200,3 +145,4 @@ class Bot(TelegramClient):
         if func in [_[0] for _ in self.list_event_handlers()]:
             return
         self.add_event_handler(func, *args, **kwargs)
+
