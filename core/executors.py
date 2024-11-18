@@ -1,153 +1,133 @@
-#    This file is part of the AutoAnime distribution.
-#    Copyright (c) 2024 Kaif_00z
-#
-#    This program is free software: you can redistribute it and/or modify
-#    it under the terms of the GNU General Public License as published by
-#    the Free Software Foundation, version 3.
-#
-#    This program is distributed in the hope that it will be useful, but
-#    WITHOUT ANY WARRANTY; without even the implied warranty of
-#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-#    General Public License for more details.
-#
-# License can be found in <
-# https://github.com/kaif-00z/AutoAnimeBot/blob/main/LICENSE > .
-
-# if you are using this following code then don't forgot to give proper
-# credit to t.me/kAiF_00z (github.com/kaif-00z)
-
 import asyncio
 import os
-import secrets
-import shutil
-from glob import glob
-from traceback import format_exc
+from pathlib import Path
+from datetime import datetime
 
-from telethon import Button
+from aiohttp import ClientSession
+from pyrogram import Client
+from pyrogram.errors import FloodWait
+from pyrogram.types import Message
 
-from core.bot import LOGS, Bot, Var
+from libs.ariawrap import aria2_download
+from libs.logger import LOGS
+from libs.subsplease import SubsPlease
+from libs.kitsu import Kitsu
 from database import DataBase
-from functions.info import AnimeInfo
-from functions.tools import Tools
-from libs.logger import Reporter
+from functions.config import Var
 
 
-class Executors:
-    def __init__(
-        self,
-        bot: Bot,
-        dB: DataBase,
-        configurations: dict,
-        input_file: str,
-        info: AnimeInfo,
-        reporter: Reporter,
-    ):
-        self.is_original = configurations.get("original_upload")
-        self.is_button = configurations.get("button_upload")
-        self.anime_info = info
+class Executor:
+    def __init__(self, bot: Client):
         self.bot = bot
-        self.input_file = input_file
-        self.tools = Tools()
-        self.db = dB
-        self.reporter = reporter
-        self.msg_id = None
-        self.output_file = None
+        self.db = DataBase()
 
-    async def execute(self):
+    async def start(self):
+        """
+        Start the main process to check RSS feed, download episodes and update posts.
+        """
+        await self.db.toggle_separate_channel_upload()
+
+        while True:
+            try:
+                await self.check_for_new_episodes()
+                await asyncio.sleep(60)  # Check every minute
+            except Exception as e:
+                LOGS.error(f"Error while processing: {str(e)}")
+                await asyncio.sleep(10)
+
+    async def check_for_new_episodes(self):
+        """
+        Check the RSS feed and process new episodes.
+        """
+        LOGS.info("Checking for new episodes in RSS feed")
+        rss = SubsPlease()
+        episodes = await rss.fetch_episodes()
+
+        for episode in episodes:
+            anime_title = episode["title"]
+            anime_url = episode["url"]
+            episode_number = episode["episode"]
+            episode_season = episode.get("season", "Unknown")  # Get the season from RSS, if available
+            episode_quality = "480p"
+
+            if not await self.db.is_anime_uploaded(anime_title):
+                LOGS.info(f"New episode detected: {anime_title} - Episode {episode_number}")
+                await self.process_episode(anime_title, anime_url, episode_number, episode_season, episode_quality)
+                await self.db.add_anime(anime_title)
+
+    async def process_episode(self, anime_title: str, anime_url: str, episode_number: int, season: str, quality: str):
+        """
+        Process the anime episode by downloading it, uploading to Telegram, and updating post.
+        """
         try:
-            rename = await self.anime_info.rename(self.is_original)
-            self.output_file = f"encode/{rename}"
-            thumb = await self.tools.cover_dl((await self.anime_info.get_poster()))
-            if self.is_original:
-                await self.reporter.started_renaming()
-                succ, out = await self.tools.rename_file(
-                    self.input_file, self.output_file
-                )
-                if not succ:
-                    return False, out
-            else:
-                _log_msg = await self.reporter.started_compressing()
-                succ, _new_msg = await self.tools.compress(
-                    self.input_file, self.output_file, _log_msg
-                )
-                if not succ:
-                    return False, _new_msg
-                self.reporter.msg = _new_msg
-            await self.reporter.started_uploading()
-            if self.is_button:
-                msg = await self.bot.upload_anime(
-                    self.output_file, rename, thumb or "thumb.jpg", is_button=True
-                )
-                btn = Button.url(
-                    f"{self.anime_info.data.get('video_resolution')}",
-                    url=f"https://t.me/{((await self.bot.get_me()).username)}?start={msg.id}",
-                )
-                self.msg_id = msg.id
-                return True, btn
-            msg = await self.bot.upload_anime(
-                self.output_file, rename, thumb or "thumb.jpg"
-            )
-            self.msg_id = msg.id
-            return True, []
-        except BaseException:
-            await self.reporter.report_error(str(format_exc()), log=True)
-            return False, str(format_exc())
+            LOGS.info(f"Downloading episode {episode_number} of {anime_title}")
 
-    def run_further_work(self):
-        asyncio.run(self.further_work())
+            # Download the episode
+            file_path = await aria2_download(anime_url, quality)
 
-    async def further_work(self):
+            # Upload the file to Telegram
+            await self.upload_to_telegram(anime_title, episode_number, season, file_path)
+
+            # Update the post with the download link
+            await self.update_post_with_link(anime_title, episode_number, season, quality, file_path)
+
+        except Exception as e:
+            LOGS.error(f"Error while processing episode {anime_title} - {episode_number}: {str(e)}")
+
+    async def upload_to_telegram(self, anime_title: str, episode_number: int, season: str, file_path: str):
+        """
+        Upload the downloaded file to Telegram.
+        """
         try:
-            if self.msg_id:
-                await self.reporter.started_gen_ss()
-                msg = await self.bot.get_messages(
-                    Var.BACKUP_CHANNEL if self.is_button else Var.MAIN_CHANNEL,
-                    ids=self.msg_id,
+            # Open the file for upload
+            with open(file_path, "rb") as f:
+                caption = f"✨ Anime Name: {anime_title} | {anime_title} ✨\n" \
+                          f"━━━━━━━━━━━━━━━\n" \
+                          f"🗣 Language: Japanese\n" \
+                          f"📺 Quality: {quality}\n" \
+                          f"🍂 Season: {season}\n" \
+                          f"📆 Episode: {episode_number}\n" \
+                          f"━━━━━━━━━━━━━━━"
+                
+                # Upload to the appropriate channel
+                if Var.MAIN_CHANNEL:
+                    await self.bot.send_document(
+                        Var.MAIN_CHANNEL,
+                        f,
+                        caption=caption,
+                        reply_markup=None,
+                        disable_notification=True
+                    )
+                    LOGS.info(f"Successfully uploaded episode {episode_number} to channel.")
+        except Exception as e:
+            LOGS.error(f"Error uploading to Telegram for episode {anime_title} - {episode_number}: {str(e)}")
+
+    async def update_post_with_link(self, anime_title: str, episode_number: int, season: str, quality: str, file_path: str):
+        """
+        Update the post in Telegram with the download link.
+        """
+        try:
+            # Generate download link
+            download_link = f"https://t.me/{Var.BOT_USERNAME}?start={episode_number}"
+
+            # Edit the post with the download link
+            message = f"✨ Anime Name: {anime_title} | {anime_title} ✨\n" \
+                      f"━━━━━━━━━━━━━━━\n" \
+                      f"🗣 Language: Japanese\n" \
+                      f"📺 Quality: {quality}\n" \
+                      f"🍂 Season: {season}\n" \
+                      f"📆 Episode: {episode_number}\n" \
+                      f"━━━━━━━━━━━━━━━"
+
+            # Update the original post with the link
+            if Var.MAIN_CHANNEL:
+                await self.bot.send_message(
+                    Var.MAIN_CHANNEL,
+                    message,
+                    reply_markup=InlineKeyboardMarkup(
+                        [[InlineKeyboardButton("Download 480p", url=download_link)]]
+                    )
                 )
-                btn = [
-                    [],
-                ]
-                link_info = await self.tools.mediainfo(self.output_file, self.bot)
-                if link_info:
-                    btn.append(
-                        [
-                            Button.url(
-                                "📜 MediaInfo",
-                                url=link_info,
-                            )
-                        ]
-                    )
-                    await msg.edit(buttons=btn)
-                _hash = secrets.token_hex(nbytes=7)
-                ss_path, sp_path = await self.tools.gen_ss_sam(_hash, self.output_file)
-                if ss_path and sp_path:
-                    ss = await self.bot.send_message(
-                        Var.CLOUD_CHANNEL,
-                        file=glob(f"{ss_path}/*") or ["assest/poster_not_found.jpg"],
-                    )
-                    sp = await self.bot.send_message(
-                        Var.CLOUD_CHANNEL,
-                        file=sp_path,
-                        thumb="thumb.jpg",
-                        force_document=True,
-                    )
-                    await self.db.store_items(_hash, [[i.id for i in ss], [sp.id]])
-                    btn.append(
-                        [
-                            Button.url(
-                                "📺 Sample & ScreenShots",
-                                url=f"https://t.me/{((await self.bot.get_me()).username)}?start={_hash}",
-                            )
-                        ]
-                    )
-                    await msg.edit(buttons=btn)
-                    await self.reporter.all_done()
-                    try:
-                        shutil.rmtree(_hash)
-                        os.remove(sp_path)
-                        os.remove(self.input_file)
-                        os.remove(self.output_file)
-                    except BaseException:
-                        LOGS.error(str(format_exc()))
-        except BaseException:
-            await self.reporter.report_error(str(format_exc()), log=True)
+            LOGS.info(f"Successfully updated post with download link for episode {anime_title} - {episode_number}.")
+        except Exception as e:
+            LOGS.error(f"Error updating post for episode {anime_title} - {episode_number}: {str(e)}")
