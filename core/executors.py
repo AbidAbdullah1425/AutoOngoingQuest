@@ -91,4 +91,16 @@ class Executors:
                         thumb="thumb.jpg",
                         force_document=True,
                     )
-                    await self.db.store_items(_hash, [[
+                    await self.db.store_items(_hash, [[i.id for i in ss], [sp.id]])
+                    await msg.edit(buttons=btn)
+                    await self.reporter.all_done()
+                    try:
+                        shutil.rmtree(_hash)
+                        os.remove(sp_path)
+                        os.remove(self.input_file)
+                        os.remove(self.output_file)
+                    except BaseException:
+                        self.logger.error(f"Error cleaning up files: {format_exc()}")
+        except BaseException:
+            self.logger.error(f"Error in further work: {format_exc()}")
+            await self.reporter.report_error(str(format_exc()), log=True)
